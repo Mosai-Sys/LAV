@@ -60,9 +60,16 @@ _ensure_base_packages()
 
 import gradio as gr
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import (VideoFileClip, concatenate_videoclips, CompositeVideoClip,
-                            AudioFileClip, ImageClip)
-import moviepy.video.fx.all as vfx
+# MoviePy v2-importer (editor-navnerommet er fjernet)
+from moviepy import (
+    VideoFileClip,
+    concatenate_videoclips,
+    CompositeVideoClip,
+    AudioFileClip,
+    ImageClip,
+    TextClip,
+    vfx,  # effektklasser, f.eks. vfx.FadeIn / vfx.FadeOut
+)
 from moviepy.audio.AudioClip import CompositeAudioClip
 
 def _has_module(name: str) -> bool:
