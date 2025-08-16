@@ -2,9 +2,26 @@
 # Herdet TTS uten pip-feil (Windows SAPI fallback), ingen auto-install av TTS/pyttsx3,
 # FFmpeg-binding før MoviePy, live-generering, captions m/ alignment, LUT, batch-eksport.
 
-import os, sys, subprocess, platform, importlib, importlib.util, re, gc, math, json, time, wave, queue, threading, contextlib, logging, shutil
+import os, sys, platform, importlib, importlib.util, re, gc, math, json, time, wave, queue, threading, contextlib, logging
+
+import warnings, tempfile, subprocess, shutil, glob, numpy as np
 from typing import List, Optional, Tuple, Dict
-import numpy as np
+
+try:
+    import imageio_ffmpeg
+except Exception:
+    imageio_ffmpeg = None
+
+OUTPUTS_DIR = os.path.join(os.getcwd(), "outputs")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+# Skjul gammelt TF32-varsel fra tredjepartskode som evt. trigges
+warnings.filterwarnings(
+    "ignore",
+    message="Please use the new API settings to control TF32 behavior",
+    category=UserWarning,
+    module="torch",
+)
 
 # ==================== BOOTSTRAP (base-avhengigheter) ====================
 
@@ -85,8 +102,12 @@ if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") is None:
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 import torch
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+try:
+    # Ny API (PyTorch 2.9+)
+    torch.backends.cudnn.conv.fp32_precision = "tf32"   # Convs
+    torch.backends.cuda.matmul.fp32_precision = "tf32"  # Matmul
+except Exception:
+    pass
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
 try:
@@ -168,7 +189,7 @@ HISTORY: List[Tuple[str, str, str]] = []  # (path, meta, prompt)
 # ==================== Hjelpere ====================
 
 def ensure_dir(p: str): os.makedirs(p, exist_ok=True)
-for d in ["outputs", "exports", "projects", "luts"]:
+for d in [OUTPUTS_DIR, "exports", "projects", "luts"]:
     ensure_dir(d)
 
 def get_device_dtype():
@@ -336,14 +357,69 @@ def _find_default_font() -> str | None:
 
 def list_output_videos():
     """List alle MP4-filer i outputs/, sortert nyest først."""
-    os.makedirs("outputs", exist_ok=True)
-    files = [f for f in os.listdir("outputs") if f.lower().endswith(".mp4")]
-    files.sort(key=lambda f: os.path.getmtime(os.path.join("outputs", f)), reverse=True)
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+    files = [f for f in os.listdir(OUTPUTS_DIR) if f.lower().endswith(".mp4")]
+    files.sort(key=lambda f: os.path.getmtime(os.path.join(OUTPUTS_DIR, f)), reverse=True)
     return files
 
-def export_to_video_safe(frames: List[np.ndarray], out_path: str, fps: int = 24, quality: int = 9):
-    try: export_to_video(frames, out_path, fps=fps, quality=quality)
-    except TypeError: export_to_video(frames, out_path, fps=fps)
+
+def export_with_nvenc(video_frames, output_path, fps=24, hevc=False):
+    if imageio_ffmpeg is None:
+        raise RuntimeError("imageio-ffmpeg ikke installert")
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    tmpdir = tempfile.mkdtemp(prefix="skyreels_nvenc_")
+    try:
+        try:
+            import cv2
+            use_cv2 = True
+        except Exception:
+            from PIL import Image
+            use_cv2 = False
+
+        for i, frame in enumerate(video_frames):
+            arr = np.array(frame)  # RGB
+            fn = os.path.join(tmpdir, f"{i:06d}.png")
+            if use_cv2:
+                import cv2
+                cv2.imwrite(fn, cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+            else:
+                Image.fromarray(arr).save(fn, format="PNG")
+
+        codec = "hevc_nvenc" if hevc else "h264_nvenc"
+        cmd = [
+            ffmpeg, "-y",
+            "-hwaccel", "cuda",
+            "-framerate", str(fps),
+            "-i", os.path.join(tmpdir, "%06d.png"),
+            "-c:v", codec,
+            "-preset", "p5",
+            "-rc", "vbr", "-cq", "19", "-b:v", "0",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            output_path,
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return output_path
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def open_outputs_dir():
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+    try:
+        os.startfile(OUTPUTS_DIR)   # Åpner Windows Explorer lokalt
+        return "Åpnet outputs-mappen i Explorer."
+    except Exception as e:
+        return f"Kunne ikke åpne outputs-mappen: {e}"
+
+
+def list_videos(limit=20):
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
+    files = sorted(glob.glob(os.path.join(OUTPUTS_DIR, "*.mp4")), key=os.path.getmtime, reverse=True)
+    labels = [os.path.basename(f) for f in files[:limit]]
+    values = files[:limit]
+    # returnerer (label, value) for Dropdown
+    return gr.Dropdown.update(choices=list(zip(labels, values)))
 
 # ==================== Generering (live preview) ====================
 
@@ -446,14 +522,17 @@ def generate_df_streaming(
     if not isinstance(out_frames, list) or len(out_frames) == 0:
         raise gr.Error("Pipeline returnerte ingen frames.")
 
-    ensure_dir("outputs")
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
     ts = time.strftime("%Y%m%d_%H%M%S")
     safe_label = str(model_label).replace("/", "-")
-    out_path = os.path.join("outputs", f"skyreels_{safe_label}_{resolution_key}_{ts}.mp4")
+    out_path = os.path.join(OUTPUTS_DIR, f"skyreels_{safe_label}_{resolution_key}_{ts}.mp4")
     try:
-        export_to_video_safe(out_frames, out_path, fps=24, quality=9)
-    except Exception as e:
-        raise gr.Error(f"MP4-feil: {e}")
+        # Prøv NVENC (GPU-encoder) først
+        export_with_nvenc(out_frames, out_path, fps=24, hevc=False)
+    except Exception:
+        # Fallback til diffusers/imageio
+        from diffusers.utils import export_to_video
+        export_to_video(out_frames, out_path, fps=24, quality=8)
 
     project_id = (project_name.strip() if str(project_name).strip() else f"proj_{ts}")
     save_project_version(project_id, "gen", out_path, {
@@ -551,7 +630,7 @@ def _tts_espeak(text: str, language: str, out_path: str) -> Optional[str]:
     if not exe: return None
     try:
         # Skriv tekst til fil for enkel quoting
-        txt = os.path.join("outputs", f"tts_{int(time.time())}.txt")
+        txt = os.path.join(OUTPUTS_DIR, f"tts_{int(time.time())}.txt")
         with open(txt, "w", encoding="utf-8") as f: f.write(text)
         subprocess.check_call([exe, "-v", language or "en", "-f", txt, "-w", out_path])
         try: os.remove(txt)
@@ -578,8 +657,8 @@ def _tts_piper(text: str, out_path: str) -> Optional[str]:
         return None
 
 def tts_to_wav(text: str, language: str = "en", speaker_wav: Optional[str] = None, out_path: Optional[str] = None) -> str:
-    ensure_dir("outputs")
-    if not out_path: out_path = os.path.join("outputs", f"tts_{int(time.time())}.wav")
+    ensure_dir(OUTPUTS_DIR)
+    if not out_path: out_path = os.path.join(OUTPUTS_DIR, f"tts_{int(time.time())}.wav")
     if not str(text).strip(): raise gr.Error("TTS: Tom tekst.")
 
     prefer = (os.environ.get("SKYREELS_TTS_BACKEND") or "").lower().strip()
@@ -748,9 +827,9 @@ def align_tts_with_aeneas(audio_path: str, text: str) -> List[Dict]:
         from aeneas.executetask import ExecuteTask  # type: ignore
         from aeneas.task import Task  # type: ignore
         sents = _split_sentences(text)
-        txt_path = os.path.join("outputs", f"aeneas_{int(time.time())}.txt")
+        txt_path = os.path.join(OUTPUTS_DIR, f"aeneas_{int(time.time())}.txt")
         with open(txt_path, "w", encoding="utf-8") as f: f.write("\n".join(sents))
-        out_json = os.path.join("outputs", f"aeneas_{int(time.time())}.json")
+        out_json = os.path.join(OUTPUTS_DIR, f"aeneas_{int(time.time())}.json")
         cfg = "task_language=eng|is_text_type=plain|os_task_file_format=json"
         task = Task(config_string=cfg)
         task.audio_file_path_absolute = os.path.abspath(audio_path)
@@ -769,8 +848,8 @@ def align_tts_with_aeneas(audio_path: str, text: str) -> List[Dict]:
         return []
 
 def generate_srt_from_tts_advanced(tts_text: str, audio_wav: Optional[str], language: str = "en") -> str:
-    ensure_dir("outputs")
-    out_path = os.path.join("outputs", f"captions_{int(time.time())}.srt")
+    ensure_dir(OUTPUTS_DIR)
+    out_path = os.path.join(OUTPUTS_DIR, f"captions_{int(time.time())}.srt")
     if not str(tts_text).strip():
         raise gr.Error("Captions: tom tekst.")
     words: List[Dict] = []
@@ -814,10 +893,10 @@ def burn_captions_on_video(
         raise gr.Error("Ugyldig kildevideo for burn-in.")
     if not srt_path or not os.path.exists(srt_path):
         raise gr.Error("SRT ikke funnet.")
-    ensure_dir("outputs")
+    ensure_dir(OUTPUTS_DIR)
     ts = time.strftime("%Y%m%d_%H%M%S")
     base = os.path.splitext(os.path.basename(src_video_path))[0]
-    out_path = os.path.join("outputs", f"{base}_captions_{ts}.mp4")
+    out_path = os.path.join(OUTPUTS_DIR, f"{base}_captions_{ts}.mp4")
 
     subs = _parse_srt(srt_path)
     clip = None; final = None
@@ -865,7 +944,7 @@ def edit_video(
     """
     if not files:
         raise gr.Error("Velg minst én video.")
-    os.makedirs("outputs", exist_ok=True)
+    os.makedirs(OUTPUTS_DIR, exist_ok=True)
     progress(0, desc="Starter redigering...")
 
     # Robust parsing av klippetider "start:end" per valgt fil (kommaseparert)
@@ -889,7 +968,7 @@ def edit_video(
     try:
         # Bygg klipp
         for i, file in enumerate(files):
-            path = os.path.join("outputs", file)
+            path = os.path.join(OUTPUTS_DIR, file)
             if not os.path.isfile(path):
                 raise gr.Error(f"Finner ikke video: {path}")
 
@@ -941,7 +1020,7 @@ def edit_video(
                 import pyttsx3  # installeres i bootstrap
                 import tempfile
 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir="outputs") as ttf:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir=OUTPUTS_DIR) as ttf:
                     tts_path = ttf.name
                 engine = pyttsx3.init()
                 engine.save_to_file(tts_text, tts_path)
@@ -954,7 +1033,7 @@ def edit_video(
 
         # Skriv ut
         safe_name = "".join(c for c in (output_name or "edited_video") if c.isalnum() or c in ("-", "_"))
-        out_path = os.path.join("outputs", f"{safe_name}.mp4")
+        out_path = os.path.join(OUTPUTS_DIR, f"{safe_name}.mp4")
 
         # Bruk fornuftige defaults; threads for Windows ytelse
         final_clip.write_videofile(
@@ -1244,7 +1323,15 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
 
                 with gr.Column(scale=1):
                     video = gr.Video(label="Resultat")
-                    meta = gr.Textbox(label="Metadata / Status", lines=10)
+                    meta = gr.Textbox(label="Metadata", interactive=False, lines=6)
+
+                    with gr.Accordion("Historikk", open=False):
+                        history = gr.Dropdown(choices=[], label="Tidligere videoer (seneste først)")
+                        with gr.Row():
+                            refresh = gr.Button("↻ Oppdater historikk", elem_classes="ghost")
+                            open_btn = gr.Button("📂 Åpne outputs-mappe", elem_classes="ghost")
+                        hist_msg = gr.Markdown("")
+
                     preview_gallery = gr.Gallery(label="Live Preview", columns=3, height=220)
 
             generate_btn.click(
@@ -1253,6 +1340,18 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
                         causal_block_size, overlap_history, addnoise_condition, num_inference_steps, override_repo_or_path],
                 outputs=[video, meta, preview_gallery]
             )
+
+            # --- callbacks under komponentene ---
+            def refresh_history():
+                return list_videos()
+
+            def load_history(selected_path):
+                # Når du velger en fil i historikk, lastes den i videospilleren
+                return selected_path
+
+            refresh.click(fn=refresh_history, inputs=[], outputs=[history])
+            open_btn.click(fn=open_outputs_dir, inputs=[], outputs=[hist_msg])
+            history.change(fn=load_history, inputs=[history], outputs=[video])
 
         # -------- Historikk & Prosjekter --------
         with gr.Tab("Historikk & Prosjekter"):
@@ -1336,7 +1435,7 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
 
             def do_burn(src, srt, font, fsize, tcol, scol, sw, bcol, balpha, pos):
                 if not src: raise gr.Error("Velg video.")
-                vpath = src if os.path.isabs(src) else os.path.join("outputs", src)
+                vpath = src if os.path.isabs(src) else os.path.join(OUTPUTS_DIR, src)
                 fpath = font.name if font and hasattr(font, "name") else None
                 return burn_captions_on_video(
                     vpath, srt.name if hasattr(srt, "name") else srt,
@@ -1367,7 +1466,7 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
             exported_files = gr.Files(label="Eksporterte filer")
 
             def do_batch_export(src, plats, wm, l, burn, srtf, pid, lutf):
-                path = src if os.path.isabs(src) else os.path.join("outputs", src) if src else ""
+                path = src if os.path.isabs(src) else os.path.join(OUTPUTS_DIR, src) if src else ""
                 if not path or not os.path.exists(path): raise gr.Error("Velg gyldig kildevideo.")
                 srtp = srtf.name if (burn and srtf) else None
                 lutp = lutf.name if lutf else None
@@ -1380,4 +1479,4 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
             )
 
 if __name__ == "__main__":
-    demo.queue(max_size=10).launch(server_name="127.0.0.1", server_port=7860, debug=True)
+    demo.queue(concurrency_count=1).launch(server_name="127.0.0.1", server_port=7860)
