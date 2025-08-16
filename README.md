@@ -3,7 +3,7 @@
 A minimal, polished **local UI** for generating **text-to-video** with **SkyReels-V2 (Diffusion Forcing)**.
 Runs fully on your machine (Windows/Linux), supports local model folders, and exports directly to **MP4** (GPU-accelerated **NVENC** by default, with a safe fallback).
 
-[https://github.com/your-org/skyreels-ui](https://github.com/your-org/skyreels-ui)
+(https://github.com/Mosai-Sys/LAV.git)
 
 ---
 
@@ -40,7 +40,7 @@ Runs fully on your machine (Windows/Linux), supports local model folders, and ex
 ### 1) Clone & create a virtual environment
 
 ```bash
-git clone https://github.com/your-org/skyreels-ui.git
+git clone [https://github.com/your-org/skyreels-ui.git](https://github.com/Mosai-Sys/LAV.git)
 cd skyreels-ui
 python -m venv venv
 # Windows:
