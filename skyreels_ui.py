@@ -89,6 +89,24 @@ from moviepy import (
 )
 from moviepy.audio.AudioClip import CompositeAudioClip
 
+
+def audio_component(label, sources=("upload",), want_type="filepath"):
+    """
+    Lager en gr.Audio-komponent som fungerer i både Gradio v5 (sources=)
+    og eldre v4 (source=). Foretrekker v5.
+    """
+    try:
+        # v5
+        return gr.Audio(sources=list(sources), label=label)
+    except TypeError:
+        # v4 fallback
+        src = sources[0] if sources else "upload"
+        try:
+            return gr.Audio(source=src, type=want_type, label=label)
+        except TypeError:
+            return gr.Audio(source=src, label=label)
+
+
 def _has_module(name: str) -> bool:
     return importlib.util.find_spec(name.split(".")[0]) is not None
 
@@ -1470,7 +1488,7 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
                     model_label = gr.Dropdown(choices=list(MODEL_CHOICES.keys()), value="DF-14B-720P", label="Modell")
                     resolution_key = gr.Dropdown(choices=list(PRESETS.keys()), value="720P", label="Oppløsning")
                     project_name = gr.Textbox(label="Prosjektnavn (valgfritt)", placeholder="Hvis tomt: auto-navn")
-                    voice_input = gr.Audio(source="microphone", type="filepath", label="STT for Prompt (mikrofon)")
+                    voice_input = audio_component("STT for Prompt (mikrofon)", sources=("microphone", "upload"))
                     stt_lang = gr.Textbox(label="STT Språk-kode (valgfritt)", value="")
                     prompt = gr.Textbox(label="Prompt", value=default_prompt, lines=5)
                     def voice_to_text(audio_path, lang):
@@ -1584,7 +1602,7 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
             refresh_caps.click(lambda: gr.update(choices=list_output_videos()), outputs=src_for_caps)
 
             cap_text = gr.Textbox(label="TTS‑tekst (bruk samme som i TTS for best synk)")
-            cap_audio = gr.Audio(source="upload", type="filepath", label="TTS‑lyd (WAV/MP3)")
+            cap_audio   = audio_component("TTS-lyd (WAV/MP3)", sources=("upload",))
             cap_lang = gr.Textbox(label="Språk-kode (for alignment, f.eks. 'en','no')", value="en")
             gen_srt_btn = gr.Button("📝 Generer SRT (auto-alignment)")
             srt_out = gr.File(label="SRT-fil")
