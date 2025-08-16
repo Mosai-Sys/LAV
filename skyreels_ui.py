@@ -296,8 +296,50 @@ def _center_crop_resize(clip: VideoFileClip, target_w: int, target_h: int) -> Vi
         new_h = int(cw / target_ar); y1 = (ch - new_h)//2
         return clip.crop(x1=0, y1=y1, x2=cw, y2=y1+new_h).resize((target_w, target_h))
 
-def list_output_videos() -> List[str]:
-    ensure_dir("outputs"); return sorted([f for f in os.listdir("outputs") if f.lower().endswith(".mp4")])
+
+def _find_default_font() -> str | None:
+    """
+    Finn en fornuftig standard font for TextClip på tvers av OS.
+    Returnerer full sti eller None (da bruker MoviePy/Pillow fallback).
+    """
+    try:
+        import platform
+        sysname = platform.system().lower()
+        candidates = []
+        if "windows" in sysname:
+            # Vanlige Windows-fonts
+            candidates = [
+                r"C:\\Windows\\Fonts\\arial.ttf",
+                r"C:\\Windows\\Fonts\\calibri.ttf",
+                r"C:\\Windows\\Fonts\\segoeui.ttf",
+            ]
+        elif "darwin" in sysname:
+            # macOS
+            candidates = [
+                "/System/Library/Fonts/Supplemental/Arial.ttf",
+                "/System/Library/Fonts/SFNS.ttf",
+                "/Library/Fonts/Arial.ttf",
+            ]
+        else:
+            # Linux
+            candidates = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+            ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+    except Exception:
+        pass
+    return None
+
+
+def list_output_videos():
+    """List alle MP4-filer i outputs/, sortert nyest først."""
+    os.makedirs("outputs", exist_ok=True)
+    files = [f for f in os.listdir("outputs") if f.lower().endswith(".mp4")]
+    files.sort(key=lambda f: os.path.getmtime(os.path.join("outputs", f)), reverse=True)
+    return files
 
 def export_to_video_safe(frames: List[np.ndarray], out_path: str, fps: int = 24, quality: int = 9):
     try: export_to_video(frames, out_path, fps=fps, quality=quality)
@@ -806,100 +848,144 @@ def burn_captions_on_video(
 # ==================== Editor ====================
 
 def edit_video(
-    files: List[str], clip_times: str, fade_in_dur: float, fade_out_dur: float,
-    text_overlay: str, text_duration: float, text_position: str,
-    tts_text: str, tts_language: str, voice_ref_wav: Optional[str],
-    bgm_audio_path: Optional[str], output_name: str, project_id: Optional[str] = None,
-    progress=gr.Progress()
-) -> str:
-    ensure_dir("outputs")
-    if not files: raise gr.Error("Velg minst én video.")
-    progress(0.0, desc="Laster klipp...")
+    files,
+    clip_times,
+    fade_in_dur,
+    fade_out_dur,
+    text_overlay,
+    text_duration,
+    text_position,
+    tts_text,
+    output_name,
+    progress=gr.Progress(),
+):
+    """
+    Rediger video: Klipp, merge, fades, tekst, TTS-lyd (offline via pyttsx3).
+    v2-kompatibel MoviePy-implementasjon med eksplisitt ressurslukking.
+    """
+    if not files:
+        raise gr.Error("Velg minst én video.")
+    os.makedirs("outputs", exist_ok=True)
+    progress(0, desc="Starter redigering...")
 
-    clips: List[VideoFileClip] = []; base = None; final_clip = None
+    # Robust parsing av klippetider "start:end" per valgt fil (kommaseparert)
+    times = []
+    if clip_times:
+        parts = [p.strip() for p in clip_times.split(",") if p.strip()]
+        # Tillat færre/ingen tider enn filer (tyst ignorer hvis ikke gitt)
+        for p in parts:
+            if ":" in p:
+                s, e = p.split(":", 1)
+                s = float(s.strip()) if s.strip() else 0.0
+                e = float(e.strip()) if e.strip() else None
+                times.append((s, e))
+            else:
+                # Én verdi = start→slutt
+                s = float(p)
+                times.append((s, None))
+
+    clips = []
+    audio_to_close = []
     try:
-        def _time_to_seconds(s: str) -> float:
-            parts = [p.strip() for p in str(s).split(":") if p.strip() != ""]
-            if not parts: return 0.0
-            parts = [float(p) for p in parts]
-            if len(parts) == 1: return parts[0]
-            if len(parts) == 2: return parts[0]*60 + parts[1]
-            return parts[0]*3600 + parts[1]*60 + parts[2]
+        # Bygg klipp
+        for i, file in enumerate(files):
+            path = os.path.join("outputs", file)
+            if not os.path.isfile(path):
+                raise gr.Error(f"Finner ikke video: {path}")
 
-        def _parse_clip_times(times_csv: str, n: int) -> List[Optional[Tuple[float, float]]]:
-            if not str(times_csv).strip(): return [None]*n
-            raw = [t.strip() for t in times_csv.split(",")]
-            out: List[Optional[Tuple[float, float]]] = []
-            for i in range(n):
-                if i >= len(raw) or raw[i] == "": out.append(None)
-                else:
-                    seg = raw[i]
-                    if ":" not in seg: out.append(None)
-                    else:
-                        ss = seg.split(":")
-                        if len(ss) < 2: out.append(None)
-                        else:
-                            start = _time_to_seconds(ss[0]); end = _time_to_seconds(ss[1])
-                            out.append((start, end) if end > start else None)
-            return out
+            clip = VideoFileClip(path)  # åpner dekoder
+            # Klipping
+            if i < len(times):
+                start, end = times[i]
+                if end is None:
+                    end = clip.duration
+                # v2: subclipped
+                clip = clip.subclipped(start, end)
 
-        times = _parse_clip_times(clip_times, len(files))
-        for i, fn in enumerate(files):
-            path = fn if os.path.isabs(fn) else os.path.join("outputs", fn)
-            if not os.path.exists(path): raise gr.Error(f"Finner ikke fil: {path}")
-            c = VideoFileClip(path)
-            if times[i] is not None:
-                st, en = times[i]; st = max(0.0, st); en = min(float(c.duration), en)
-                if en > st: c = c.subclip(st, en)
-            if fade_in_dur > 0: c = vfx.fadein(c, fade_in_dur)
-            if fade_out_dur > 0: c = vfx.fadeout(c, fade_out_dur)
-            clips.append(c)
-            progress((i + 1) / max(1, len(files)), desc=f"Prosesserer {os.path.basename(path)}")
+            # Fades via v2-effektklasser + with_effects
+            effects = []
+            if fade_in_dur and fade_in_dur > 0:
+                effects.append(vfx.FadeIn(fade_in_dur))
+            if fade_out_dur and fade_out_dur > 0:
+                effects.append(vfx.FadeOut(fade_out_dur))
+            if effects:
+                clip = clip.with_effects(effects)
 
-        base = concatenate_videoclips(clips, method="compose")
-        overlays = [base]
-        if text_overlay and text_duration > 0:
-            img = _make_text_image(text_overlay, base.w, base.h, pos=text_position)
-            overlay_clip = ImageClip(np.array(img)).set_duration(min(text_duration, base.duration))
-            if text_position == "top": overlay_clip = overlay_clip.set_position(("center", "top"))
-            elif text_position == "bottom": overlay_clip = overlay_clip.set_position(("center", "bottom"))
-            else: overlay_clip = overlay_clip.set_position("center")
-            overlays.append(overlay_clip)
+            clips.append(clip)
+            progress((i + 1) / max(1, len(files)), desc=f"Prosesserer {file}")
 
-        final_clip = CompositeVideoClip(overlays, size=(base.w, base.h))
+        # Merge (compose håndterer ulike størrelser)
+        final_clip = concatenate_videoclips(clips, method="compose")
 
-        audio_clip = None
-        if tts_text and tts_text.strip():
-            tts_wav = tts_to_wav(tts_text, language=tts_language or "en", speaker_wav=voice_ref_wav)
-            mix_path = os.path.join("outputs", f"mix_{int(time.time())}.wav")
-            mixed_wav = mix_audio_tracks(tts_wav, bgm_audio_path, mix_path)
-            audio_clip = AudioFileClip(mixed_wav).set_duration(final_clip.duration)
+        # Tekst‑overlegg (v2: TextClip(...) + with_* metoder)
+        if text_overlay:
+            font_path = _find_default_font()
+            try:
+                txt_clip = TextClip(
+                    text=text_overlay,
+                    font=font_path,        # kan være None → Pillow default
+                    font_size=70,
+                    color="white",
+                ).with_duration(float(text_duration))
+                # Støtt "center", "top", "bottom" etc.
+                txt_clip = txt_clip.with_position(text_position)
+                # Legg over
+                final_clip = CompositeVideoClip([final_clip, txt_clip])
+            except Exception as e:
+                # Ikke stopp hele redigeringen ved font‑/tekstfeil
+                logger.warning(f"Tekst‑overlegg hoppet over: {e}")
 
-        if audio_clip is not None and final_clip.audio is not None:
-            final_audio = CompositeAudioClip([final_clip.audio, audio_clip])
-            final_clip = final_clip.set_audio(final_audio)
-        elif audio_clip is not None:
-            final_clip = final_clip.set_audio(audio_clip)
+        # TTS (offline) → WAV → som audio på final_clip
+        if tts_text:
+            try:
+                import pyttsx3  # installeres i bootstrap
+                import tempfile
 
-        safe = "".join(ch for ch in (output_name or "edited_video") if ch.isalnum() or ch in ("_", "-"))
-        out_path = os.path.join("outputs", f"{safe}.mp4")
-        progress(0.9, desc="Rendrer video...")
-        final_clip.write_videofile(out_path, codec="libx264", audio_codec="aac", threads=os.cpu_count(), verbose=False, logger=None)
-        progress(1.0, desc="Ferdig!")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav", dir="outputs") as ttf:
+                    tts_path = ttf.name
+                engine = pyttsx3.init()
+                engine.save_to_file(tts_text, tts_path)
+                engine.runAndWait()
+                audio = AudioFileClip(tts_path)
+                audio_to_close.append(audio)
+                final_clip = final_clip.with_audio(audio)
+            except Exception as e:
+                logger.warning(f"TTS feilet, fortsetter uten voiceover: {e}")
 
-        if project_id:
-            save_project_version(project_id, "edit", out_path, {"notes": "timeline edit + overlays"})
-        return out_path
+        # Skriv ut
+        safe_name = "".join(c for c in (output_name or "edited_video") if c.isalnum() or c in ("-", "_"))
+        out_path = os.path.join("outputs", f"{safe_name}.mp4")
+
+        # Bruk fornuftige defaults; threads for Windows ytelse
+        final_clip.write_videofile(
+            out_path,
+            codec="libx264",
+            audio_codec="aac",
+            fps=24,
+            preset="medium",
+            threads=max(1, (os.cpu_count() or 4) // 2),
+        )
+
+        updated = list_output_videos()
+        return out_path, gr.update(choices=updated)
+
     finally:
+        # Lukk i motsatt rekkefølge for å slippe fil‑låser
+        try:
+            if 'final_clip' in locals():
+                final_clip.close()
+        except Exception:
+            pass
+        for a in audio_to_close:
+            try:
+                a.close()
+            except Exception:
+                pass
         for c in clips:
-            try: c.close()
-            except Exception: pass
-        try:
-            if base: base.close()
-        except Exception: pass
-        try:
-            if final_clip: final_clip.close()
-        except Exception: pass
+            try:
+                c.close()
+            except Exception:
+                pass
 
 # ==================== Looks, LUT & Eksport ====================
 
@@ -1205,11 +1291,6 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
 
             gr.Markdown("**Voiceover (TTS)**")
             tts_text = gr.Textbox(label="TTS‑tekst")
-            tts_language = gr.Textbox(label="Språk-kode (f.eks. 'en','no','de' ...)", value="en")
-            voice_ref_wav = gr.Audio(source="upload", type="filepath", label="Referanse-stemme (valgfri, WAV/MP3)")
-            bgm_audio = gr.Audio(source="upload", type="filepath", label="BGM lydfil (WAV/MP3)")
-
-            project_id_for_edit = gr.Textbox(label="Prosjekt-ID (valgfritt, for versjonshistorikk)", value="")
             output_name = gr.Textbox(label="Output‑navn (uten .mp4)", value="edited_video")
             edit_btn = gr.Button("🎬 Rediger og lagre")
             edited_video = gr.Video(label="Redigert video")
@@ -1217,8 +1298,8 @@ with gr.Blocks(css=CSS, theme=theme, title="SkyReels — Lokal Studio (v8.2)") a
             edit_btn.click(
                 edit_video,
                 inputs=[videos_dd, clip_times, fade_in_dur, fade_out_dur, text_overlay, text_duration,
-                        text_position, tts_text, tts_language, voice_ref_wav, bgm_audio, output_name, project_id_for_edit],
-                outputs=edited_video
+                        text_position, tts_text, output_name],
+                outputs=[edited_video, videos_dd]
             )
 
         # -------- Captions --------
