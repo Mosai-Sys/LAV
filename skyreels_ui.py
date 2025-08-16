@@ -1273,8 +1273,183 @@ _env_doctor()
 # ==================== UI ====================
 
 CSS = """
-:root { --bg0: #0b0d1a; --text: #e6e8ff; }
-body { background: var(--bg0); color: var(--text); }
+:root {
+  /* Palett */
+  --bg0: #060814;
+  --bg1: #0a0e1e;
+  --bg2: #0f1427;
+  --card: rgba(16, 20, 38, 0.78);
+  --control: rgba(19, 23, 45, 0.92);
+  --control-hover: rgba(25, 30, 60, 0.98);
+  --border: rgba(255,255,255,0.10);
+  --border-strong: rgba(255,255,255,0.16);
+  --accent1: #7c3aed; /* violet */
+  --accent2: #06b6d4; /* cyan */
+  --text: #e7eaff;
+  --muted: #a6aecf;
+
+  /* Radius, skygger, anim */
+  --radius: 16px;
+  --radius-lg: 18px;
+  --shadow: 0 14px 40px rgba(0,0,0,0.35);
+  --shadow-soft: 0 10px 26px rgba(0,0,0,0.28);
+  --ring: 0 0 0 3px rgba(124,58,237,0.35);
+}
+
+* { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Inter, Roboto, Helvetica, Arial; }
+html, body, .gradio-container { color-scheme: dark; }
+
+.gradio-container {
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(124,58,237,0.25), transparent 45%),
+    radial-gradient(1200px 600px at 90% -10%, rgba(6,182,212,0.22), transparent 45%),
+    linear-gradient(180deg, var(--bg1), var(--bg0));
+  color: var(--text);
+}
+
+/* HEADER */
+#app-header {
+  display:flex; align-items:center; justify-content:space-between;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0));
+  position: sticky; top:0; z-index:20; backdrop-filter: blur(10px);
+}
+.brand { display:flex; align-items:center; gap:12px; font-weight:800; color:var(--text); }
+.brand-badge {
+  width: 36px; height: 36px; border-radius: 10px;
+  background: linear-gradient(135deg, var(--accent1), var(--accent2));
+  box-shadow: 0 10px 26px rgba(124,58,237,0.35), 0 10px 26px rgba(6,182,212,0.22);
+}
+.nav { display:flex; gap:14px; color:var(--muted); font-weight:600; }
+
+/* SEKSJONER / KORT */
+.section { margin: 18px 22px; }
+.hero {
+  padding: 28px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.015));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow);
+}
+h1.hero-title {
+  font-size: 36px; line-height:1.15; margin:0 0 8px 0; font-weight:900;
+  background: linear-gradient(90deg, var(--accent1), var(--accent2));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+p.hero-sub { color: var(--muted); margin:0; }
+
+.card {
+  padding: 16px 16px 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-soft);
+  background: var(--card);
+  transition: transform .12s ease, border-color .12s ease, box-shadow .2s ease;
+}
+.card:hover { transform: translateY(-1px); border-color: var(--border-strong); box-shadow: var(--shadow); }
+
+.grid-2 { display:grid; grid-template-columns: 1.1fr 1fr; gap:16px; }
+
+/* KONTROLLER – ADAPTIVE MØRKT TEMA */
+label { color: var(--muted) !important; font-weight: 600; }
+
+/* Alle tekstfelt, tallfelt, dropdowns */
+.gradio-container input,
+.gradio-container textarea,
+.gradio-container select,
+.gradio-container .gradio-dropdown,
+.gradio-container .gradio-number input {
+  background: var(--control) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.gradio-container input:hover,
+.gradio-container textarea:hover,
+.gradio-container select:hover,
+.gradio-container .gradio-dropdown:hover,
+.gradio-container .gradio-number input:hover {
+  background: var(--control-hover) !important;
+  border-color: var(--border-strong) !important;
+}
+.gradio-container input:focus,
+.gradio-container textarea:focus,
+.gradio-container select:focus,
+.gradio-container .gradio-number input:focus {
+  outline: none !important;
+  border-color: var(--accent1) !important;
+  box-shadow: var(--ring) !important;
+}
+.gradio-container ::placeholder { color: color-mix(in oklab, var(--muted) 80%, transparent); }
+
+/* Dropdown-menyer (åpen liste) */
+.gradio-container [role="listbox"] {
+  background: var(--control) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+}
+.gradio-container [role="option"] {
+  color: var(--text) !important;
+}
+.gradio-container [role="option"][aria-selected="true"],
+.gradio-container [role="option"]:hover {
+  background: color-mix(in oklab, var(--accent1) 22%, transparent) !important;
+}
+
+/* Slidere */
+.gradio-container input[type="range"] {
+  -webkit-appearance: none; appearance: none; width:100%;
+  background: transparent; height: 22px;
+}
+.gradio-container input[type="range"]::-webkit-slider-runnable-track {
+  height: 8px; border-radius: 999px;
+  background: linear-gradient(90deg, color-mix(in oklab, var(--accent1) 60%, var(--bg2)), color-mix(in oklab, var(--accent2) 60%, var(--bg2)));
+  border: 1px solid var(--border);
+}
+.gradio-container input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance:none; appearance:none;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; border: 2px solid var(--accent1);
+  box-shadow: 0 6px 14px rgba(0,0,0,0.35);
+  margin-top: -6px; transition: transform .08s ease, border-color .12s ease;
+}
+.gradio-container input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.05); border-color: var(--accent2); }
+
+/* KNAPPER */
+button.primary {
+  background: linear-gradient(90deg, var(--accent1), var(--accent2));
+  color: white; border: none; border-radius: 14px;
+  padding: 14px 16px; font-weight: 800;
+  box-shadow: 0 12px 28px rgba(124,58,237,0.35);
+  transition: transform .08s ease, box-shadow .2s ease, filter .12s ease;
+}
+button.primary:hover { transform: translateY(-1px); box-shadow: 0 14px 32px rgba(124,58,237,0.45); filter: brightness(1.03); }
+button.primary:focus { outline: none; box-shadow: var(--ring); }
+
+button.ghost {
+  background: transparent; color: var(--text);
+  border: 1px solid var(--border); border-radius: 12px;
+  padding: 10px 12px; font-weight: 700; transition: border-color .12s ease, background .12s ease;
+}
+button.ghost:hover { border-color: var(--border-strong); background: rgba(255,255,255,0.03); }
+
+/* “Lerret” bak video */
+.slate {
+  aspect-ratio: 16/9;
+  background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg);
+  display: grid; place-items: center; color: var(--muted);
+}
+
+/* Rullbar estetikk */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb {
+  border-radius: 20px;
+  background: linear-gradient(180deg, var(--accent1), var(--accent2));
+}
+*::-webkit-scrollbar-track { background: transparent; }
 """
 
 default_prompt = (
